@@ -1,0 +1,139 @@
+// Static site generator: reads results/*.jsonl, writes site/dist/index.html
+// (single page, data inlined, charts drawn client-side as inline SVG; no dependencies).
+// usage: node site/build.mjs
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const jsonl = (f) =>
+  readFileSync(join(root, "results", f), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+
+const median = (xs) => {
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+
+const timing = {};
+for (const r of jsonl("timing.jsonl")) (timing[`${r.variant}|${r.cold}`] ??= []).push(r.ms);
+const wall = Object.entries(timing).map(([k, ms]) => {
+  const [variant, cold] = k.split("|");
+  return { variant, cold: +cold, median: median(ms), min: Math.min(...ms), max: Math.max(...ms), runs: ms.length };
+});
+const cache = jsonl("cachegrind.jsonl");
+
+const data = { wall, cache, generated: new Date().toISOString() };
+
+const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OOP vs DOD Cache</title>
+<style>
+:root { --bg:#fff; --fg:#1b1f24; --muted:#64707d; --grid:#e3e7eb; --oop:#d1481f; --dod:#1f6fd1; }
+@media (prefers-color-scheme: dark) { :root { --bg:#14181d; --fg:#e6e9ec; --muted:#8b97a3; --grid:#2a3139; --oop:#ff7a52; --dod:#5ea2ff; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
+main { max-width:860px; margin:0 auto; padding:24px 16px 48px; }
+h1 { font-size:1.4rem; margin:0 0 4px; }
+p.sub { color:var(--muted); margin:0 0 20px; }
+nav { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+nav a { padding:6px 12px; border:1px solid var(--grid); border-radius:6px; color:var(--fg); text-decoration:none; }
+nav a[aria-current="page"] { background:var(--fg); color:var(--bg); border-color:var(--fg); }
+svg { width:100%; height:auto; display:block; }
+svg text { fill:var(--muted); font-size:12px; }
+.legend { display:flex; gap:16px; margin:8px 0; }
+.legend span::before { content:""; display:inline-block; width:12px; height:12px; border-radius:2px; margin-right:6px; vertical-align:-1px; background:var(--c); }
+table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }
+th, td { text-align:right; padding:6px 10px; border-bottom:1px solid var(--grid); }
+th:first-child, td:first-child { text-align:left; }
+.scroll { overflow-x:auto; }
+footer { color:var(--muted); font-size:.85rem; margin-top:24px; }
+</style>
+</head>
+<body>
+<main>
+<h1>OOP vs DOD: cache behaviour</h1>
+<p class="sub">Cold bytes per entity on the x axis. Same update loop, different memory layout.</p>
+<nav id="nav"></nav>
+<section id="view"></section>
+<footer id="foot"></footer>
+</main>
+<script>
+const DATA = ${JSON.stringify(data)};
+const COLORS = { oop: "var(--oop)", dod: "var(--dod)" };
+const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "K" : String(n);
+
+const PAGES = {
+  wall: { title: "Wall clock", unit: "ms (median of runs, bars show min-max)", series: () => bySeries(DATA.wall, "median", "min", "max") },
+  d1:   { title: "L1 data misses", unit: "simulated D1 misses", series: () => bySeries(DATA.cache, "d1_misses") },
+  l2:   { title: "Last-level misses", unit: "simulated LL (L2) misses", series: () => bySeries(DATA.cache, "l2_misses") },
+  table:{ title: "Data" },
+};
+
+function bySeries(rows, key, lo, hi) {
+  const out = {};
+  for (const r of rows) (out[r.variant] ??= []).push({ x: r.cold, y: r[key], lo: lo ? r[lo] : r[key], hi: hi ? r[hi] : r[key] });
+  for (const v in out) out[v].sort((a, b) => a.x - b.x);
+  return out;
+}
+
+function chart(series, unit) {
+  const W = 760, H = 360, m = { l: 64, r: 16, t: 16, b: 48 };
+  const xs = [...new Set(Object.values(series).flat().map((p) => p.x))].sort((a, b) => a - b);
+  const ymax = Math.max(...Object.values(series).flat().map((p) => p.hi)) * 1.08;
+  const X = (x) => m.l + (xs.indexOf(x) / Math.max(xs.length - 1, 1)) * (W - m.l - m.r);
+  const Y = (y) => H - m.b - (y / ymax) * (H - m.t - m.b);
+  let s = '<svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="' + unit + '">';
+  for (let i = 0; i <= 4; i++) {
+    const v = (ymax / 4) * i, y = Y(v);
+    s += '<line x1="' + m.l + '" x2="' + (W - m.r) + '" y1="' + y + '" y2="' + y + '" stroke="var(--grid)"/>';
+    s += '<text x="' + (m.l - 8) + '" y="' + (y + 4) + '" text-anchor="end">' + fmt(Math.round(v)) + "</text>";
+  }
+  for (const x of xs) s += '<text x="' + X(x) + '" y="' + (H - m.b + 18) + '" text-anchor="middle">' + x + "</text>";
+  s += '<text x="' + (W / 2) + '" y="' + (H - 6) + '" text-anchor="middle">cold bytes per entity</text>';
+  for (const [v, pts] of Object.entries(series)) {
+    const c = COLORS[v] || "var(--fg)";
+    s += '<polyline fill="none" stroke="' + c + '" stroke-width="2.5" points="' + pts.map((p) => X(p.x) + "," + Y(p.y)).join(" ") + '"/>';
+    for (const p of pts) {
+      if (p.hi !== p.lo) s += '<line x1="' + X(p.x) + '" x2="' + X(p.x) + '" y1="' + Y(p.lo) + '" y2="' + Y(p.hi) + '" stroke="' + c + '" stroke-width="1.5"/>';
+      s += '<circle cx="' + X(p.x) + '" cy="' + Y(p.y) + '" r="4" fill="' + c + '"><title>' + v + " cold=" + p.x + ": " + Math.round(p.y).toLocaleString() + "</title></circle>";
+    }
+  }
+  return s + "</svg>";
+}
+
+function table() {
+  const cold = [...new Set(DATA.cache.map((r) => r.cold))].sort((a, b) => a - b);
+  const get = (rows, v, c) => rows.find((r) => r.variant === v && r.cold === c) || {};
+  let h = '<div class="scroll"><table><thead><tr><th>cold</th><th>oop ms</th><th>dod ms</th><th>oop D1</th><th>dod D1</th><th>oop LL</th><th>dod LL</th></tr></thead><tbody>';
+  for (const c of cold) {
+    const o = get(DATA.cache, "oop", c), d = get(DATA.cache, "dod", c);
+    const wo = get(DATA.wall, "oop", c), wd = get(DATA.wall, "dod", c);
+    h += "<tr><td>" + c + "</td><td>" + wo.median + "</td><td>" + wd.median + "</td><td>" + fmt(o.d1_misses) + "</td><td>" + fmt(d.d1_misses) + "</td><td>" + fmt(o.l2_misses) + "</td><td>" + fmt(d.l2_misses) + "</td></tr>";
+  }
+  return h + "</tbody></table></div>";
+}
+
+function render() {
+  const id = (location.hash || "#wall").slice(1);
+  const page = PAGES[id] || PAGES.wall;
+  document.getElementById("nav").innerHTML = Object.entries(PAGES)
+    .map(([k, p]) => '<a href="#' + k + '"' + (PAGES[id] ? (k === id ? ' aria-current="page"' : "") : (k === "wall" ? ' aria-current="page"' : "")) + ">" + p.title + "</a>").join("");
+  document.getElementById("view").innerHTML = page.series
+    ? '<div class="legend"><span style="--c:var(--oop)">oop</span><span style="--c:var(--dod)">dod</span></div>' + chart(page.series(), page.unit) + '<p class="sub">' + page.unit + "</p>"
+    : table();
+}
+window.addEventListener("hashchange", render);
+render();
+document.getElementById("foot").textContent = "Generated " + DATA.generated;
+</script>
+</body>
+</html>
+`;
+
+mkdirSync(join(root, "site", "dist"), { recursive: true });
+writeFileSync(join(root, "site", "dist", "index.html"), html);
+console.log("wrote site/dist/index.html");
