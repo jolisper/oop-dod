@@ -1,31 +1,4 @@
-// Static site generator: reads results/*.jsonl, writes site/dist/index.html
-// (single page, data inlined, charts drawn client-side as inline SVG; no dependencies).
-// usage: node site/build.mjs
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const jsonl = (f) =>
-  readFileSync(join(root, "results", f), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-
-const median = (xs) => {
-  const s = [...xs].sort((a, b) => a - b);
-  const m = s.length >> 1;
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-};
-
-const timing = {};
-for (const r of jsonl("timing.jsonl")) (timing[`${r.variant}|${r.cold}`] ??= []).push(r.ms);
-const wall = Object.entries(timing).map(([k, ms]) => {
-  const [variant, cold] = k.split("|");
-  return { variant, cold: +cold, median: median(ms), min: Math.min(...ms), max: Math.max(...ms), runs: ms.length };
-});
-const cache = jsonl("cachegrind.jsonl");
-
-const data = { wall, cache, generated: new Date().toISOString() };
-
-const html = `<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -50,7 +23,6 @@ table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums;
 th, td { text-align:right; padding:6px 10px; border-bottom:1px solid var(--grid); }
 th:first-child, td:first-child { text-align:left; }
 .scroll { overflow-x:auto; }
-footer { color:var(--muted); font-size:.85rem; margin-top:24px; }
 </style>
 </head>
 <body>
@@ -58,18 +30,39 @@ footer { color:var(--muted); font-size:.85rem; margin-top:24px; }
 <h1>OOP vs DOD: cache behaviour</h1>
 <p class="sub">Cold bytes per entity on the x axis. Same update loop, different memory layout.</p>
 <nav id="nav"></nav>
-<section id="view"></section>
-<footer id="foot"></footer>
+<section id="view">Loading results…</section>
 </main>
 <script>
-const DATA = ${JSON.stringify(data)};
 const COLORS = { oop: "var(--oop)", dod: "var(--dod)" };
 const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "K" : String(n);
+const median = (xs) => {
+  const s = [...xs].sort((a, b) => a - b), m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+
+// Results are served from ../results relative to this page (server root = repo root).
+async function jsonl(name) {
+  const res = await fetch("../results/" + name);
+  if (!res.ok) throw new Error(name + ": HTTP " + res.status);
+  return (await res.text()).split("\n").filter(Boolean).map((l) => JSON.parse(l));
+}
+
+let DATA;
+async function load() {
+  const [timing, cache] = await Promise.all([jsonl("timing.jsonl"), jsonl("cachegrind.jsonl")]);
+  const groups = {};
+  for (const r of timing) (groups[r.variant + "|" + r.cold] ??= []).push(r.ms);
+  const wall = Object.entries(groups).map(([k, ms]) => {
+    const [variant, cold] = k.split("|");
+    return { variant, cold: +cold, median: median(ms), min: Math.min(...ms), max: Math.max(...ms) };
+  });
+  DATA = { wall, cache };
+}
 
 const PAGES = {
   wall: { title: "Wall clock", unit: "ms (median of runs, bars show min-max)", series: () => bySeries(DATA.wall, "median", "min", "max") },
   d1:   { title: "L1 data misses", unit: "simulated D1 misses", series: () => bySeries(DATA.cache, "d1_misses") },
-  l2:   { title: "Last-level misses", unit: "simulated LL (L2) misses", series: () => bySeries(DATA.cache, "l2_misses") },
+  ll:   { title: "Last-level misses", unit: "simulated last-level (LL) misses", series: () => bySeries(DATA.cache, "ll_misses") },
   table:{ title: "Data" },
 };
 
@@ -112,28 +105,28 @@ function table() {
   for (const c of cold) {
     const o = get(DATA.cache, "oop", c), d = get(DATA.cache, "dod", c);
     const wo = get(DATA.wall, "oop", c), wd = get(DATA.wall, "dod", c);
-    h += "<tr><td>" + c + "</td><td>" + wo.median + "</td><td>" + wd.median + "</td><td>" + fmt(o.d1_misses) + "</td><td>" + fmt(d.d1_misses) + "</td><td>" + fmt(o.l2_misses) + "</td><td>" + fmt(d.l2_misses) + "</td></tr>";
+    h += "<tr><td>" + c + "</td><td>" + wo.median + "</td><td>" + wd.median + "</td><td>" + fmt(o.d1_misses) + "</td><td>" + fmt(d.d1_misses) + "</td><td>" + fmt(o.ll_misses) + "</td><td>" + fmt(d.ll_misses) + "</td></tr>";
   }
   return h + "</tbody></table></div>";
 }
 
 function render() {
-  const id = (location.hash || "#wall").slice(1);
-  const page = PAGES[id] || PAGES.wall;
+  const hash = (location.hash || "#wall").slice(1);
+  const id = PAGES[hash] ? hash : "wall";
+  const page = PAGES[id];
   document.getElementById("nav").innerHTML = Object.entries(PAGES)
-    .map(([k, p]) => '<a href="#' + k + '"' + (PAGES[id] ? (k === id ? ' aria-current="page"' : "") : (k === "wall" ? ' aria-current="page"' : "")) + ">" + p.title + "</a>").join("");
+    .map(([k, p]) => '<a href="#' + k + '"' + (k === id ? ' aria-current="page"' : "") + ">" + p.title + "</a>").join("");
   document.getElementById("view").innerHTML = page.series
     ? '<div class="legend"><span style="--c:var(--oop)">oop</span><span style="--c:var(--dod)">dod</span></div>' + chart(page.series(), page.unit) + '<p class="sub">' + page.unit + "</p>"
     : table();
 }
-window.addEventListener("hashchange", render);
-render();
-document.getElementById("foot").textContent = "Generated " + DATA.generated;
+
+load().then(() => {
+  window.addEventListener("hashchange", render);
+  render();
+}).catch((e) => {
+  document.getElementById("view").textContent = "Could not load results: " + e.message + ". Serve the repo root (scripts/start.sh) so ../results/ is reachable.";
+});
 </script>
 </body>
 </html>
-`;
-
-mkdirSync(join(root, "site", "dist"), { recursive: true });
-writeFileSync(join(root, "site", "dist", "index.html"), html);
-console.log("wrote site/dist/index.html");

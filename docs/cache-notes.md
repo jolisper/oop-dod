@@ -44,10 +44,11 @@ your data layout decides how much of each line is useful.
 
 ## Notes on this repo's setup
 
-- `scripts/cg.sh` simulates 64 KB 4-way L1 and a 4 MB 16-way last level, both with
-  128 B lines, approximating Apple Silicon. Canonical x86 is 64 B lines,
-  32-48 KB 8-12-way L1, private L2, shared L3. These figures are an
-  approximation, not checked against Apple's specs.
+- `scripts/cg.sh` simulates a typical x86-style cache: 32 KB 8-way L1 and an
+  8 MB 16-way last level (standing in for L3; cachegrind models no L2), both
+  with 64 B lines. With 64 B lines, OOP misses saturate at `cold=60`, where an
+  entity fills a whole line. The wall-clock runs use the real host CPU (Apple
+  Silicon, 128 B lines), so the two measurements differ in cache design.
 - `page_allocator` hints each mmap below the previous block. Under valgrind the
   first block sits at a low address, so the hint wraps and mmap fails with
   EINVAL. `dod.zig` allocates `cold` first to avoid it.

@@ -1,8 +1,7 @@
 #!/bin/zsh
-# usage: scripts/start.sh [port]   (rebuilds the site from results/*.jsonl and serves it; default port 8000)
+# usage: scripts/start.sh [port]   (serves the repo so site/index.html can read results/*.jsonl; default port 8000)
 set -e
 cd "${0:A:h}/.."
 P=${1:-8000}
-node site/build.mjs
-open "http://localhost:$P/"
-python3 -m http.server $P --bind 127.0.0.1 -d site/dist
+open "http://localhost:$P/site/"
+python3 -m http.server $P --bind 127.0.0.1
