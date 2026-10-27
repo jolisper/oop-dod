@@ -18,3 +18,4 @@ done
 sed -i '' "s/^pub const cold = [0-9]*;/pub const cold = 60;/" src/config.zig
 rm -f out/*.o(N)
 scripts/cg.sh
+scripts/asm.sh

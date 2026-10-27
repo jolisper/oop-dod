@@ -11,9 +11,11 @@ entity also carries `cold` bytes of data the loop never reads.
   array and the cold data lives in a separate one that the loop never touches.
 
 The benchmark repeats this for `cold` = 0, 12, 28, 60 and 124 bytes. OOP slows
-down as `cold` grows (about 20x at 124 bytes). DOD stays flat.
+down as `cold` grows (about 14x at 124 bytes). DOD stays flat.
 
-See [docs/cache-notes.md](docs/cache-notes.md) for the cache concepts behind it.
+See [docs/cache-notes.md](docs/cache-notes.md) for the cache concepts behind it
+and [docs/assembly-analysis.md](docs/assembly-analysis.md) for a comparison of
+the generated assembly.
 
 ## Requirements
 
@@ -40,7 +42,9 @@ For each `cold` size this cross-compiles both variants for
 `aarch64-linux-gnu` into `out/`, runs each 3 times in the container for
 wall-clock time, then runs `scripts/cg.sh`. That runs both variants under
 cachegrind and reports data references, L1 data misses and last-level misses.
-`scripts/cg.sh` can also be run on its own to reuse the binaries in `out/`.
+Finally `scripts/asm.sh` extracts the timed region of the generated assembly.
+`scripts/cg.sh` and `scripts/asm.sh` can also be run on their own to reuse the
+binaries and assembly in `out/`.
 
 Results are written to `results/` as JSON Lines, one datapoint per line,
 overwritten on each run:
@@ -49,6 +53,7 @@ overwritten on each run:
 |---|---|
 | `timing.jsonl` | `variant`, `cold`, `run`, `ms` |
 | `cachegrind.jsonl` | `variant`, `cold`, `drefs`, `d1_misses`, `ll_misses` |
+| `asm.jsonl` | `variant`, `cold`, `lines` (timed-region instructions) |
 
 View the results as charts:
 
@@ -64,11 +69,12 @@ run just reload it; there is no build step.
 
 ```
 src/       oop.zig  dod.zig  config.zig   benchmark programs and parameters
-scripts/   run.sh  cg.sh  start.sh        run, cachegrind, view
+scripts/   run.sh  cg.sh  asm.sh  start.sh run, cachegrind, assembly, view
 docker/    Dockerfile                     valgrind image
 site/      index.html                     static results page (reads results/)
 results/   *.jsonl                        benchmark datapoints
 docs/      cache-notes.md                 background notes
+           assembly-analysis.md           OOP vs DOD assembly comparison
 out/       build outputs (ignored)
 ```
 

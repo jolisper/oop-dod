@@ -23,6 +23,15 @@ table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums;
 th, td { text-align:right; padding:6px 10px; border-bottom:1px solid var(--grid); }
 th:first-child, td:first-child { text-align:left; }
 .scroll { overflow-x:auto; }
+.cols { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:16px; }
+.cols h2 { font-size:1rem; margin:0 0 6px; }
+pre { margin:0; padding:10px 12px; border:1px solid var(--grid); border-radius:6px; overflow-x:auto; font:13px/1.5 ui-monospace, Menlo, monospace; }
+pre .hot { display:block; background:color-mix(in srgb, var(--fg) 10%, transparent); }
+.take { margin:0 0 16px; padding:10px 12px; border-left:3px solid var(--dod); background:color-mix(in srgb, var(--fg) 5%, transparent); }
+.notes { padding-left:20px; }
+.notes li { margin-bottom:6px; }
+code { font:.9em ui-monospace, Menlo, monospace; }
+nav.sizes a { padding:2px 10px; font-size:.9rem; }
 </style>
 </head>
 <body>
@@ -49,14 +58,14 @@ async function jsonl(name) {
 
 let DATA;
 async function load() {
-  const [timing, cache] = await Promise.all([jsonl("timing.jsonl"), jsonl("cachegrind.jsonl")]);
+  const [timing, cache, asm] = await Promise.all([jsonl("timing.jsonl"), jsonl("cachegrind.jsonl"), jsonl("asm.jsonl")]);
   const groups = {};
   for (const r of timing) (groups[r.variant + "|" + r.cold] ??= []).push(r.ms);
   const wall = Object.entries(groups).map(([k, ms]) => {
     const [variant, cold] = k.split("|");
     return { variant, cold: +cold, median: median(ms), min: Math.min(...ms), max: Math.max(...ms) };
   });
-  DATA = { wall, cache };
+  DATA = { wall, cache, asm };
 }
 
 const PAGES = {
@@ -64,6 +73,7 @@ const PAGES = {
   d1:   { title: "L1 data misses", unit: "simulated D1 misses", series: () => bySeries(DATA.cache, "d1_misses") },
   ll:   { title: "Last-level misses", unit: "simulated last-level (LL) misses", series: () => bySeries(DATA.cache, "ll_misses") },
   table:{ title: "Data" },
+  asm:  { title: "Assembly" },
 };
 
 function bySeries(rows, key, lo, hi) {
@@ -110,15 +120,47 @@ function table() {
   return h + "</tbody></table></div>";
 }
 
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// Timed region of each variant; the first backward branch closes the inner loop (highlighted).
+function asmView(cold) {
+  const sizes = [...new Set(DATA.asm.map((r) => r.cold))].sort((a, b) => a - b);
+  let h = '<p class="take"><strong>Takeaway:</strong> the compiler is not the cause. Both layouts compile to nearly the same loop; the speed and cache-miss gap comes from the addresses the loop touches.</p>';
+  h += '<nav class="sizes">cold: ' + sizes.map((c) => '<a href="#asm/' + c + '"' + (c === cold ? ' aria-current="page"' : "") + ">" + c + "</a>").join("") + "</nav>";
+  h += '<div class="cols">';
+  const counts = {};
+  for (const v of ["oop", "dod"]) {
+    const row = DATA.asm.find((r) => r.variant === v && r.cold === cold);
+    if (!row) continue;
+    const end = row.lines.findIndex((l) => /^b\.\w+ \.\w+/.test(l));
+    const start = row.lines.indexOf(row.lines[end].split(" ")[1] + ":");
+    counts[v] = end - start;
+    h += "<div><h2>" + v + "</h2><pre>" + row.lines.map((l, i) => (i > start && i <= end ? '<span class="hot">' + esc(l) + "</span>" : esc(l) + "\n")).join("") + "</pre></div>";
+  }
+  h += "</div><p class=\"sub\">Highlighted: the inner loop, one iteration per element (" +
+    Object.entries(counts).map(([v, n]) => v + " " + n + " instructions").join(", ") +
+    "). The code between the two clock_gettime calls. Details in docs/assembly-analysis.md.</p>";
+  h += '<ul class="notes">' +
+    "<li><strong>Same work per element:</strong> one load, add 1, one store. DOD even runs one more instruction (separate <code>add</code> and <code>cmp</code>), yet is much faster.</li>" +
+    "<li><strong>Only the stride differs:</strong> OOP advances by the entity size (<code>cold</code> + 4 = " + (cold + 4) + " B, the immediate in <code>str w, [x], #N</code>); DOD always advances 4 B.</li>" +
+    "<li><strong>Why it matters:</strong> with a 64 B cache line, OOP at a stride of 64 B or more uses one line per element and wastes the rest; DOD uses all 16 <code>health</code> values in each line.</li>" +
+    "<li><strong>At cold = 0</strong> the entity is just <code>health</code>, so both loops are identical.</li>" +
+    "<li><strong>Neither loop is vectorized</strong> (scalar <code>w</code> registers), so SIMD is not what separates them.</li>" +
+    "</ul>";
+  return h;
+}
+
 function render() {
-  const hash = (location.hash || "#wall").slice(1);
+  const [hash, param] = (location.hash || "#wall").slice(1).split("/");
   const id = PAGES[hash] ? hash : "wall";
   const page = PAGES[id];
   document.getElementById("nav").innerHTML = Object.entries(PAGES)
     .map(([k, p]) => '<a href="#' + k + '"' + (k === id ? ' aria-current="page"' : "") + ">" + p.title + "</a>").join("");
-  document.getElementById("view").innerHTML = page.series
-    ? '<div class="legend"><span style="--c:var(--oop)">oop</span><span style="--c:var(--dod)">dod</span></div>' + chart(page.series(), page.unit) + '<p class="sub">' + page.unit + "</p>"
-    : table();
+  document.getElementById("view").innerHTML = id === "asm"
+    ? asmView(param === undefined ? 60 : +param)
+    : page.series
+      ? '<div class="legend"><span style="--c:var(--oop)">oop</span><span style="--c:var(--dod)">dod</span></div>' + chart(page.series(), page.unit) + '<p class="sub">' + page.unit + "</p>"
+      : table();
 }
 
 load().then(() => {
